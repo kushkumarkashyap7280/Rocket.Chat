@@ -46,7 +46,11 @@ Meteor.methods<ServerMethods>({
 		}
 
 		if (message.reactions?.[reaction] && message.reactions[reaction].usernames.indexOf(user.username) !== -1) {
-			message.reactions[reaction].usernames.splice(message.reactions[reaction].usernames.indexOf(user.username), 1);
+			const idx = message.reactions[reaction].usernames.indexOf(user.username);
+			message.reactions[reaction].usernames.splice(idx, 1);
+			if (message.reactions[reaction].userIds) {
+				message.reactions[reaction].userIds?.splice(idx, 1);
+			}
 
 			if (message.reactions[reaction].usernames.length === 0) {
 				delete message.reactions[reaction];
@@ -71,9 +75,14 @@ Meteor.methods<ServerMethods>({
 			if (!message.reactions[reaction]) {
 				message.reactions[reaction] = {
 					usernames: [],
+					userIds: [],
 				};
 			}
+			if (!message.reactions[reaction].userIds) {
+				message.reactions[reaction].userIds = message.reactions[reaction].usernames.map(() => '');
+			}
 			message.reactions[reaction].usernames.push(user.username);
+			message.reactions[reaction].userIds?.push(getUserId() as string);
 
 			Messages.state.update(
 				(record) => record._id === messageId,

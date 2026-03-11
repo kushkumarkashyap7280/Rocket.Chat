@@ -136,6 +136,7 @@ async function updateUsernameReferences({
 
 		await Messages.updateAllUsernamesByUserId(user._id, username);
 		await Messages.updateUsernameOfEditByUserId(user._id, username);
+		await Messages.updateReactionUsernamesByUserId(user._id, username);
 
 		const cursor = Messages.findByMention(previousUsername);
 		for await (const msg of cursor) {

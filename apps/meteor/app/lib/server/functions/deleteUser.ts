@@ -108,6 +108,9 @@ export async function deleteUser(userId: string, confirmRelinquish = false, dele
 		await Rooms.updateGroupDMsRemovingUsernamesByUsername(user.username, userId); // Remove direct rooms with the user
 		await Rooms.removeDirectRoomContainingUsername(user.username); // Remove direct rooms with the user
 
+		// Remove the user's reactions from all messages (for reactions that store userIds)
+		await Messages.removeReactionsByUserId(userId);
+
 		const rids = subscribedRooms.map((room) => room.rid);
 		void notifyOnRoomChangedById(rids);
 

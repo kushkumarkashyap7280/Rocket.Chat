@@ -63,6 +63,7 @@ describe('Reactions', () => {
 				reactions: {
 					test: {
 						usernames: ['test', 'test2'],
+						userIds: ['uid1', 'uid2'],
 					},
 				},
 			};
@@ -70,12 +71,15 @@ describe('Reactions', () => {
 			const result = removeUserReaction(message as any, 'test', 'test');
 			expect(result.reactions.test.usernames).to.not.include('test');
 			expect(result.reactions.test.usernames).to.include('test2');
+			expect(result.reactions.test.userIds).to.not.include('uid1');
+			expect(result.reactions.test.userIds).to.include('uid2');
 		});
 		it('should remove the reaction from a message when the user is the last one on the array', () => {
 			const message = {
 				reactions: {
 					test: {
 						usernames: ['test'],
+						userIds: ['uid1'],
 					},
 				},
 			};
@@ -88,9 +92,11 @@ describe('Reactions', () => {
 				reactions: {
 					test: {
 						usernames: ['test', 'test2'],
+						userIds: ['uid1', 'uid2'],
 					},
 					other: {
 						usernames: ['test', 'test2'],
+						userIds: ['uid1', 'uid2'],
 					},
 				},
 			};
@@ -114,6 +120,20 @@ describe('Reactions', () => {
 			expect(result.reactions.test.usernames).to.not.include('test3');
 			expect(result.reactions.test.usernames).to.include('test');
 			expect(result.reactions.test.usernames).to.include('test2');
+		});
+		it('should also remove userId at the same index when userIds array is present', () => {
+			const message = {
+				reactions: {
+					test: {
+						usernames: ['user1', 'user2', 'user3'],
+						userIds: ['id1', 'id2', 'id3'],
+					},
+				},
+			};
+			// Remove the middle entry
+			const result = removeUserReaction(message as any, 'test', 'user2');
+			expect(result.reactions.test.usernames).to.deep.equal(['user1', 'user3']);
+			expect(result.reactions.test.userIds).to.deep.equal(['id1', 'id3']);
 		});
 	});
 	describe('executeSetReaction', () => {

@@ -674,6 +674,170 @@ export class MessagesRaw extends BaseRaw<IMessage> implements IMessagesModel {
 		return this.updateOne({ _id: messageId }, { $set: { reactions } });
 	}
 
+	/**
+	 * Updates the username stored inside every reaction on messages where the user
+	 * (identified by userId) has reacted. Called after a username change so that
+	 * reaction tooltips remain accurate without a full schema migration.
+	 */
+	updateReactionUsernamesByUserId(userId: string, newUsername: string): Promise<UpdateResult | Document> {
+		return this.col.updateMany(
+			{
+				// Only touch messages that have at least one reaction containing this userId
+				$expr: {
+					$anyElementTrue: {
+						$map: {
+							input: { $objectToArray: { $ifNull: ['$reactions', {}] } },
+							in: { $in: [userId, { $ifNull: ['$$this.v.userIds', []] }] },
+						},
+					},
+				},
+			},
+			[
+				{
+					$set: {
+						reactions: {
+							$arrayToObject: {
+								$map: {
+									input: { $objectToArray: '$reactions' },
+									as: 'reaction',
+									in: {
+										k: '$$reaction.k',
+										v: {
+											$mergeObjects: [
+												'$$reaction.v',
+												{
+													usernames: {
+														$map: {
+															input: { $range: [0, { $size: '$$reaction.v.usernames' }] },
+															as: 'idx',
+															in: {
+																$cond: {
+																	if: {
+																		$eq: [{ $arrayElemAt: ['$$reaction.v.userIds', '$$idx'] }, userId],
+																	},
+																	then: newUsername,
+																	else: { $arrayElemAt: ['$$reaction.v.usernames', '$$idx'] },
+																},
+															},
+														},
+													},
+												},
+											],
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			],
+		);
+	}
+
+	/**
+	 * Removes a deleted user from all reaction arrays across all messages.
+	 * Only affects reactions that store userIds (reactions added after the
+	 * migration to the hybrid userId+username schema). Legacy username-only
+	 * reactions are left untouched.
+	 */
+	removeReactionsByUserId(userId: string): Promise<UpdateResult | Document> {
+		return this.col.updateMany(
+			{
+				$expr: {
+					$anyElementTrue: {
+						$map: {
+							input: { $objectToArray: { $ifNull: ['$reactions', {}] } },
+							in: { $in: [userId, { $ifNull: ['$$this.v.userIds', []] }] },
+						},
+					},
+				},
+			},
+			[
+				{
+					$set: {
+						reactions: {
+							$let: {
+								vars: {
+									filteredReactions: {
+										$filter: {
+											input: {
+												$map: {
+													input: { $objectToArray: '$reactions' },
+													as: 'reaction',
+													in: {
+														k: '$$reaction.k',
+														v: {
+															$mergeObjects: [
+																'$$reaction.v',
+																{
+																	usernames: {
+																		$filter: {
+																			input: {
+																				$map: {
+																					input: {
+																						$range: [0, { $size: '$$reaction.v.usernames' }],
+																					},
+																					as: 'idx',
+																					in: {
+																						$cond: {
+																							if: {
+																								$eq: [
+																									{
+																										$arrayElemAt: [
+																											'$$reaction.v.userIds',
+																											'$$idx',
+																										],
+																									},
+																									userId,
+																								],
+																							},
+																							then: null,
+																							else: {
+																								$arrayElemAt: [
+																									'$$reaction.v.usernames',
+																									'$$idx',
+																								],
+																							},
+																						},
+																					},
+																				},
+																			},
+																			cond: { $ne: ['$$this', null] },
+																		},
+																	},
+																	userIds: {
+																		$filter: {
+																			input: { $ifNull: ['$$reaction.v.userIds', []] },
+																			cond: { $ne: ['$$this', userId] },
+																		},
+																	},
+																},
+															],
+														},
+													},
+												},
+											},
+											// Drop emoji keys whose reaction list is now empty
+											cond: { $gt: [{ $size: '$$this.v.usernames' }, 0] },
+										},
+									},
+								},
+								in: {
+									// When all reactions have been removed, unset the field entirely
+									$cond: {
+										if: { $gt: [{ $size: '$$filteredReactions' }, 0] },
+										then: { $arrayToObject: '$$filteredReactions' },
+										else: '$$REMOVE',
+									},
+								},
+							},
+						},
+					},
+				},
+			],
+		);
+	}
+
 	keepHistoryForToken(token: string): Promise<UpdateResult | Document> {
 		return this.updateMany(
 			{

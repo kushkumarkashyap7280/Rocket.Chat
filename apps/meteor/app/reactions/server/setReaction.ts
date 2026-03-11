@@ -25,6 +25,9 @@ export const removeUserReaction = (message: IMessage, reaction: string, username
 	}
 
 	message.reactions[reaction].usernames.splice(idx, 1);
+	if (message.reactions[reaction].userIds) {
+		message.reactions[reaction].userIds?.splice(idx, 1);
+	}
 	if (!message.reactions[reaction].usernames.length) {
 		delete message.reactions[reaction];
 	}
@@ -73,9 +76,15 @@ export async function setReaction(room: IRoom, user: IUser, message: IMessage, r
 		if (!message.reactions[reaction]) {
 			message.reactions[reaction] = {
 				usernames: [],
+				userIds: [],
 			};
 		}
+		// Initialise userIds array for legacy reaction entries that predate this change
+		if (!message.reactions[reaction].userIds) {
+			message.reactions[reaction].userIds = message.reactions[reaction].usernames.map(() => '');
+		}
 		message.reactions[reaction].usernames.push(user.username as string);
+		message.reactions[reaction].userIds?.push(user._id);
 		await Messages.setReactions(message._id, message.reactions);
 		if (isTheLastMessage(room, message)) {
 			await Rooms.setReactionsInLastMessage(room._id, message.reactions);
