@@ -128,9 +128,10 @@ Below is the concrete map of the Rocket.Chat source files involved in this imple
 
 ### Phase 2: Message Interceptors (Sync & Async)
 *   **Create `apps/meteor/server/services/anti-spam/AntiSpamService.ts`**
-    *   *Action:* The main orchestrator class that calculates LSH and manages database updates.
+    *   *Action:* The main orchestrator class that runs the database updates and similarity calculations.
+    *   *LSH Implementation:* Instead of building complex math from scratch, the service will utilize a standard lightweight library like `minhash` (`npm install minhash`). Text is broken into 3-character "shingles" to create the `lshSignatures`. The `jaccard()` method will compare the new signature array against the user's `UserUnderInspection.lshSignatures` history, looking for an >85% match.
 *   **Create `apps/meteor/server/services/messages/hooks/BeforeSaveAntiSpam.ts`**
-    *   *Action:* The Sync Gate. Checked alongside native filters (like `BadWords`). Executes O(1) hashes and URL checks. If triggered: it mutates **`message.customFields.antiSpamProcessedSync = true`** so the Async worker does not double-count the penalty.
+    *   *Action:* The Sync Gate. Checked alongside native filters (like `BadWords`). Executes O(1) hashes (MD5 or SHA-256) and URL checks. If triggered: it mutates **`message.customFields.antiSpamProcessedSync = true`** so the Async worker does not double-count the penalty.
 *   **Modify / Attach to `apps/meteor/server/lib/callbacks.ts` Registries:**
     *   Register **`afterCreateUser`**: Initialize the DB record.
     *   Register **`beforeJoinRoom`**: Update `uniqueRoomsCount` and run velocity math.
