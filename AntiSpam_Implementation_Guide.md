@@ -18,8 +18,12 @@ graph TD
     J2 -- >4 Rooms / 60s --> J3[Score +1]
     
     %% Message Lifecycle
-    C[User Sends Message] --> D[executeSendMessage]
-    D --> E{Stage 1: Sync Gate<br>Message.beforeSave}
+    C[User Sends Message] --> D{Auto-Healing Check<br>lastViolationAt > 48h?}
+    D -- Yes --> D1[Subtract Score -1]
+    D -- No --> D2
+    D1 --> D2[executeSendMessage]
+    
+    D2 --> E{Stage 1: Sync Gate<br>Message.beforeSave}
     
     E -->|Check| F[Exact Message Hash or URL Match?]
     F -- Yes --> G[Add Score + mutates:<br>message.customFields.antiSpamProcessedSync = true]
@@ -37,9 +41,10 @@ graph TD
     M -- Match > 85% --> N[Score +2]
     M -- No Match --> L
     
-    %% AI Pipeline
-    N -. Checks Total Score .-> O{Score >= 7 ?}
-    O -- Yes --> P[Trigger AI Narrative Generation Job]
+    %% Enforcement & AI Pipeline
+    N -. Updates Score .-> RL{Rate Limiter Check}
+    RL -- Score >= 5 --> RM[Activate Strict custom Throttle<br>1 msg/min]
+    RL -- Score >= 7 --> O[Trigger AI Narrative Job & Global Mute]
 ```
 
 ---
@@ -95,8 +100,8 @@ This realistic scoring scale protects innocent explorers from false positives. *
 | **Fuzzy / Modded Matching** | Stage 2 (Async LSH Worker) | LSH Jaccard Similarity > 85% compared to recent messages. | **+2 Points** |
 | **Malicious Link Re-posting** | Stage 1 (Sync Gate Hook) | `message.urls` array contains a URL the user previously posted in a *different* room. | **+3 Points** |
 
-**Score Decay (Automated Forgiveness):** 
-A scheduled cron job checks the `lastViolationAt` timestamp. If 48 hours have passed with zero infractions, it subtracts `-1` from the score.
+**Score Decay (Event-Driven Auto-Healing):** 
+Instead of relying on a heavy server cron job, the system uses an event-driven auto-healing mechanism. Every time a user attempts to send a message, the system checks their `lastViolationAt` timestamp. If more than 48 hours have passed since their last recorded infraction, the system automatically subtracts `-1` from their score *before* processing the new message. This ensures minor infractions decay naturally without manual admin intervention.
 
 ### B. The Enforcement Handlers (Chaos Scale)
 
