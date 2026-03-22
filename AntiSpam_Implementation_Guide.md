@@ -1,66 +1,150 @@
-# New User Anti-Spam Monitoring System
+# Detailed Implementation Plan: Hybrid Behavioral Anti-Spam Engine
 
-This document outlines the architecture, integration points, and implementation strategy for the proposed Anti-Spam monitoring system, focusing on Locality Sensitive Hashing (LSH) for immediate detection and AI-based behavioral scoring.
-
-## 🎯 Architecture Overview
-
-The system transitions Rocket.Chat from binary walls (block/allow) to a **Behavioral Intelligence Layer** combining rapid heuristics checking with asynchronous AI scoring. 
-
-- **Layer 1 (Heuristics/LSH):** Integrated directly into the message pipeline. Swiftly compares message text and detects aggressive velocity using LSH to block repeated spammers near-instantly without blocking the event loop.
-- **Layer 2 (AI Scoring):** Asynchronous evaluation of a user's broader behavioral profile (room-hopping, activity spikes, fan-out ratios) over their first 6-10 weeks. 
+This document outlines the precise architectural implementation for the Rocket.Chat "New Users Anti-Spammer System". It is designed to be highly performant, catching spammers through a dual-stage message interceptor while leveraging existing Rocket.Chat utilities for rate-limiting, UI integrations, and event callbacks.
 
 ---
 
-## 📂 Key Codebase Files & Integration Points
+## 1. System Architecture & Data Flow
 
-Here is a map of where you will need to inject or modify logic to implement the full MVP.
+The system intercepts core entity actions (Targeting Messages & Room Joins) without modifying Rocket.Chat's raw base methods. It operates entirely on the `MessageService` event pipeline and event registries.
 
-### 1. The Core Message Pipeline (Backend)
-
-*   **`apps/meteor/app/lib/server/methods/sendMessage.ts`** & **`apps/meteor/app/lib/server/functions/sendMessage.ts`**
-    *   **Why you need it:** These files execute when a user posts a message. This is the main funnel for all chat interactions.
-    *   **Implementation:** You will intercept the message here for the fast heuristic check before it enters the database.
-
-*   **`apps/meteor/app/lib/server/startup/rateLimiter.js`**
-    *   **Why you need it:** This currently handles DDP rate limits (e.g., max messages per second). 
-    *   **Implementation:** You will extend these definitions so that users within the "6-10 weeks" timeframe hit tighter velocity throttles based on their risk score.
-
-### 2. Immediate Pattern Check (The LSH Layer)
-
-*   **`apps/meteor/server/services/messages/hooks/` (Directory)**
-    *   **Why you need it:** You can see existing message interceptors here (like `BeforeSaveBadWords.ts` and `BeforeSavePreventMention.ts`).
-    *   **Implementation:** You will create a file here: `BeforeSaveSpamCheck.ts`. In this hook, you will apply the Locality Sensitive Hashing (LSH) to compare the new message's hash against recent messages by that user. If similarity is excessively high across multiple rooms within minutes, you temporarily read-only restrict them.
-
-### 3. The Analytics & AI Scoring Layer
-
-*   **`apps/meteor/server/services/spamsentry/spamsentry.service.ts` (New Service)**
-    *   **Why you need it:** We shouldn't run expensive background evaluations in the main web threads. LSH is fast, but AI behavioral scoring requires a dedicated space.
-    *   **Implementation:** Create this backend service using Rocket.Chat's service infrastructure (similar to other packages/services). This service listens to event streams (like user joins, messages sent) and updates a dedicated `UserSafety` TTL index collection. This service handles the async calculation for "Daily Risk Scoring."
-
-### 4. User Interface & Admin Verification (Frontend)
-
-*   **`apps/meteor/client/views/admin/` (Directory)**
-    *   **Why you need it:** Admins need to see the behavioral scoring and adjust the "Risk Profiles." 
-    *   **Implementation:** Add a dedicated "Anti-Spam Intelligence" dashboard (e.g., `apps/meteor/client/views/admin/spam/`) or augment the existing "Users" tab to surface users with high AI-assigned risk scores.
-
-*   **`apps/meteor/client/views/room/composer/ComposerMessage.tsx`**
-    *   **Why you need it:** If a user triggers the LSH immediate block, the frontend composer needs to inform them gracefully.
-    *   **Implementation:** Catch the custom error thrown cleanly by `BeforeSaveSpamCheck.ts` and show a banner indicating they are temporarily muted.
+```mermaid
+graph TD
+    %% User Lifecycle
+    A[New User Account Created] -->|callbacks.afterCreateUser| B[(UserUnderInspection DB<br>TTL Index: 10 Weeks)]
+    
+    %% Room Join Lifecycle
+    J1[User Joins Room] -->|callbacks.beforeJoinRoom| J2[Velocity Tracker]
+    J2 -- >4 Rooms / 60s --> J3[Score +1]
+    
+    %% Message Lifecycle
+    C[User Sends Message] --> D[executeSendMessage]
+    D --> E{Stage 1: Sync Gate<br>Message.beforeSave}
+    
+    E -->|Check| F[Exact Message Hash or URL Match?]
+    F -- Yes --> G[Add Score + mutates:<br>message.customFields.antiSpamProcessedSync = true]
+    F -- No --> H[No Mutation]
+    
+    G --> I[(Save to Messages DB)]
+    H --> I
+    
+    I -->|callbacks.afterSaveMessage| J{Stage 2: Async LSH Worker}
+    
+    J --> K{Check message.customFields}
+    K -- antiSpamProcessedSync == true --> L[Skip Scoring <br> Update Signatures Only]
+    K -- antiSpamProcessedSync == false --> M[Run MinHash / LSH Jaccard]
+    
+    M -- Match > 85% --> N[Score +2]
+    M -- No Match --> L
+    
+    %% AI Pipeline
+    N -. Checks Total Score .-> O{Score >= 7 ?}
+    O -- Yes --> P[Trigger AI Narrative Generation Job]
+```
 
 ---
 
-## 🛠️ Step-by-Step Implementation Guide
+## 2. Core Data Modeling & Schema
 
-### Phase 1: Establish the Fast LSH Hook (Days 1-3)
-1. Write the LSH comparison logic function (keep it lightweight!).
-2. Attach it into `apps/meteor/server/services/messages/hooks/BeforeSaveSpamCheck.ts`.
-3. Have it apply a temporary role or flag if triggered.
+To maintain a lean core, we use a shadow data approach. This model lives strictly for the 6-10 week onboarding phase using MongoDB's TTL index.
 
-### Phase 2: Create the Daily Scoring Service (Days 4-7)
-1. Create `spamsentry.service.ts` in the services folder. 
-2. Emit events from user actions (sendMessage, joinRoom) and capture them in `spamsentry`.
-3. Compute daily risk scores continuously. Store them using a MongoDB TTL (Time-to-Live) index so data naturally expires after the 6-10 week watch window concludes.
+```typescript
+// packages/core-typings/src/IUserUnderInspection.ts
+export interface IUserUnderInspection extends IRocketChatRecord {
+    _id: string;
+    userId: string;
+    violationScore: number;
 
-### Phase 3: Expose to Admins (Days 8-10)
-1. Add new endpoints in `apps/meteor/app/api/server/v1/` to fetch the high-risk users list.
-2. Build UI blocks in `apps/meteor/client/views/admin/spam/` with a simple table showing risk status, LSH triggers, and buttons to override.
+    // --- STAGE 1: SYNC GATE (Exact Match) ---
+    // Stores MD5/SHA256 hashes of recent messages for immediate O(1) matching
+    exactHashes: string[]; 
+
+    // --- STAGE 2: ASYNC LAYER (Fuzzy Match / LSH) ---
+    // Stores the MinHash signatures (e.g., 128 integers each) 
+    // for the last 5 messages to calculate Jaccard Similarity.
+    lshSignatures: number[][]; 
+
+    metadata: {
+        // --- BEHAVIORAL TRACKING ---
+        // Array of unique RIDs messaged in during the 10-week window
+        processedRooms: string[]; 
+        uniqueRoomsCount: number; 
+        
+        joinVelocity: number;      
+        totalMessagesSent: number;
+        aiSummary?: string;        
+    };
+
+    lastViolationAt?: Date;        
+    createdAt: Date;               
+}
+```
+
+---
+
+## 3. The Scoring Matrix & Enforcement Map
+
+This realistic scoring scale protects innocent explorers from false positives. **Level 3 (Global Admin Review) requires 7 Points.**
+
+### A. The Triggers (Violation Accumulation)
+
+| Trigger Component | Detection Stage | Condition | Penalty |
+| :--- | :--- | :--- | :--- |
+| **Abnormal Room Hopping** | `beforeJoinRoom` Callback | User joins > 4 public channels in under 60 seconds. | **+1 Point** |
+| **Identical Text Matching** | Stage 1 (Sync Gate Hook) | Exact string match with any of their last 5 messages. | **+2 Points** |
+| **Fuzzy / Modded Matching** | Stage 2 (Async LSH Worker) | LSH Jaccard Similarity > 85% compared to recent messages. | **+2 Points** |
+| **Malicious Link Re-posting** | Stage 1 (Sync Gate Hook) | `message.urls` array contains a URL the user previously posted in a *different* room. | **+3 Points** |
+
+**Score Decay (Automated Forgiveness):** 
+A scheduled cron job checks the `lastViolationAt` timestamp. If 48 hours have passed with zero infractions, it subtracts `-1` from the score.
+
+### B. The Enforcement Handlers (Chaos Scale)
+
+| Strike Level | Score | Action Taken | Internal Mechanism Used |
+| :--- | :--- | :--- | :--- |
+| **Level 1** | **3+** | Automated DM Warning | Sends a direct message impersonating the system (`rocket.cat`). |
+| **Level 2** | **5+** | Room Mute & Rate Limit | Triggers native `muteUserInRoom(systemId, { rid, username })` + dynamic `RateLimiter` rule limits them to 1 msg/min. |
+| **Level 3** | **7+** | Global Mute & AI Radar | Strips standard roles (global mute) + Triggers AI summary generator + Pushes to Admin Dashboard. |
+
+---
+
+## 4. File-by-File Modification Structure
+
+Below is the concrete map of the Rocket.Chat source files involved in this implementation.
+
+### Phase 1: Database & Core Types
+*   **Modify `packages/core-typings/src/IUser.ts`**
+    *   *Action:* Add `inspectionId?: string;` to allow fast O(1) existence checks without doing a secondary collection join on every server operation.
+*   **Create `packages/core-typings/src/IUserUnderInspection.ts`**
+    *   *Action:* Export the interface defined above.
+*   **Create `packages/models/src/models/UserUnderInspection.ts`** (Abstract)
+*   **Create `apps/meteor/server/models/raw/UserUnderInspection.ts`** (Concrete MongoDB adapter)
+    *   *Action:* Initialize the TTL index inside `onStartup`: `this.col.createIndex({ createdAt: 1 }, { expireAfterSeconds: 6048000 })`
+
+### Phase 2: Message Interceptors (Sync & Async)
+*   **Create `apps/meteor/server/services/anti-spam/AntiSpamService.ts`**
+    *   *Action:* The main orchestrator class that calculates LSH and manages database updates.
+*   **Create `apps/meteor/server/services/messages/hooks/BeforeSaveAntiSpam.ts`**
+    *   *Action:* The Sync Gate. Checked alongside native filters (like `BadWords`). Executes O(1) hashes and URL checks. If triggered: it mutates **`message.customFields.antiSpamProcessedSync = true`** so the Async worker does not double-count the penalty.
+*   **Modify / Attach to `apps/meteor/server/lib/callbacks.ts` Registries:**
+    *   Register **`afterCreateUser`**: Initialize the DB record.
+    *   Register **`beforeJoinRoom`**: Update `uniqueRoomsCount` and run velocity math.
+    *   Register **`afterSaveMessage`**: The Async Worker layer. It explicitly skips similarity math if `message.customFields.antiSpamProcessedSync === true`.
+
+### Phase 3: Dynamic Rate Limiting
+*   **Modify `apps/meteor/app/lib/server/lib/RateLimiter.ts`** (Or initialize in `AntiSpamService.ts`)
+    *   *Action:* Add a custom `RateLimiter.limitMethod('sendMessage', 1, 60000)` rule that intercepts outgoing messages. The rule's `userId()` callback returns `true` *only* if the underlying `UserUnderInspection.violationScore >= 5`, automatically throttling them.
+
+### Phase 4: Targeted AI Generation
+*   **Create `apps/meteor/server/services/anti-spam/AiDiagnosticReport.ts`**
+    *   *Action:* Triggered strictly when a user breaches **7 Points**. Fetches the user's last 15-20 messages and raw velocity metrics. Formats a lean prompt for the Workspace's configured AI provider (e.g., OpenAI API) asking for a 2-sentence spam narrative. Saves output directly to `.metadata.aiSummary`.
+
+### Phase 5: Moderation UI (Front-End)
+*   **Modify `apps/meteor/client/views/room/contextualBar/UserInfo/UserInfoWithData.tsx`**
+    *   *Action (Channel Level):* When a room Moderator clicks a user, dynamically display an orange/red "Spam Risk" badge based on their score API fetch.
+*   **Modify `apps/meteor/client/views/room/contextualBar/UserInfo/UserInfoActions.tsx`**
+    *   *Action (Channel Level):* Add a "Vouch for User" button that safely zeroes-out the violation score for falsely flagged members.
+*   **Modify `apps/meteor/client/views/admin/moderation/ModerationConsolePage.tsx`** 
+    *   *Action (Workspace Level):* Add a "New Users Watchlist" tab explicitly targeting accounts with Scores `> 0`. Displays a high-level table integrating the triggered `aiSummary` to provide instant context for the Global Admin's final decision (Deactivate completely or Vouch).
+*   **Create `apps/meteor/server/api/v1/anti-spam.ts`**
+    *   *Action:* Provide `GET /v1/anti-spam.getScore` (REST Endpoint) for the React clients to fetch user shadow data securely (gated by `view-privileged-setting` permissions).
