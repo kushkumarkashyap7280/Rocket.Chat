@@ -141,16 +141,70 @@ Below is the concrete map of the Rocket.Chat source files involved in this imple
 *   **Modify `apps/meteor/app/lib/server/lib/RateLimiter.ts`** (Or initialize in `AntiSpamService.ts`)
     *   *Action:* Add a custom `RateLimiter.limitMethod('sendMessage', 1, 60000)` rule that intercepts outgoing messages. The rule's `userId()` callback returns `true` *only* if the underlying `UserUnderInspection.violationScore >= 5`, automatically throttling them.
 
-### Phase 4: Targeted AI Generation
-*   **Create `apps/meteor/server/services/anti-spam/AiDiagnosticReport.ts`**
-    *   *Action:* Triggered strictly when a user breaches **7 Points**. Fetches the user's last 15-20 messages and raw velocity metrics. Formats a lean prompt for the Workspace's configured AI provider (e.g., OpenAI API) asking for a 2-sentence spam narrative. Saves output directly to `.metadata.aiSummary`.
+### Phase 4: Summaries & On-Demand AI Diagnostic Analysis
+*   **Rule-Based Behavior Summary (Immediate/Channel Level):** 
+    *   *Action:* Instead of relying on a costly AI for every single flag, the system will instantly generate a pre-formatted, deterministic summary (e.g., *"User hit 7 points; generated 2 Exact Link Matches in 4 rooms within 5 minutes"*). This guarantees 100% reliability for standard moderators.
+*   **Create `apps/meteor/server/services/anti-spam/AiDiagnosticReport.ts` (On-Demand AI):**
+    *   *Action:* An endpoint strictly triggered **manually by Global Admins** when they want to deeply investigate a highly suspicious user.
+    *   *Prompt Construction:* Gathers the raw `UserUnderInspection` statistics + the user's **last 15 public channel messages**. It formats this payload and passes it to Rocket.Chat's configured LLM App.
+    *   *Output:* A detailed, contextual narrative combining both metrics and message intent to yield highly specific **Suggested Moderation Actions** before an Admin decides to globally ban or vouch.
 
-### Phase 5: Moderation UI (Front-End)
+### Phase 5: Moderation UI (Admin Visibility & Reversibility)
+*   *Requirement Focus:* **Actions must be reversible and configurable.** Admins must have full visibility into flags and logs.
 *   **Modify `apps/meteor/client/views/room/contextualBar/UserInfo/UserInfoWithData.tsx`**
-    *   *Action (Channel Level):* When a room Moderator clicks a user, dynamically display an orange/red "Spam Risk" badge based on their score API fetch.
+    *   *Action (Channel Level):* When a room Moderator clicks a user, dynamically display an orange/red **Spam risk flag** and the basic rule-based behavior log.
 *   **Modify `apps/meteor/client/views/room/contextualBar/UserInfo/UserInfoActions.tsx`**
-    *   *Action (Channel Level):* Add a "Vouch for User" button that safely zeroes-out the violation score for falsely flagged members.
+    *   *Action (Reversibility):* Add a "Vouch for User" button that safely zeroes-out the violation score and lifts any rate-limits for falsely flagged members.
 *   **Modify `apps/meteor/client/views/admin/moderation/ModerationConsolePage.tsx`** 
-    *   *Action (Workspace Level):* Add a "New Users Watchlist" tab explicitly targeting accounts with Scores `> 0`. Displays a high-level table integrating the triggered `aiSummary` to provide instant context for the Global Admin's final decision (Deactivate completely or Vouch).
+    *   *Action (Workspace Level - Admin Visibility):* Add a new "Anti-Spam Watchlist" tab explicitly targeting accounts with Scores `> 0`. This dashboard will display:
+        *   **Suspicious activity logs** (What rules they broke and when).
+        *   A **"Request On-Demand AI Analysis"** button that fetches the deep LLM behavioral summary.
+        *   Buttons to instantly *Ban*, *Mute*, or *Vouch* (Reverse all penalties).
+
+### Phase 6: Basic Reporting (Cron & Endpoints)
+*   **Create `apps/meteor/server/services/anti-spam/ReportingService.ts`**
+    *   *Action:* A lightweight daily job that aggregates data from the `UserUnderInspection` collection to generate a basic report for workspace administrators.
+    *   *Outputs:*
+        *   **Newly flagged users:** How many users entered the shadow DB today.
+        *   **Daily risk changes:** Shifts in user violation scores.
+        *   **Triggered moderation actions:** Count of autobans/mutes executed by Level 2 and Level 3 rules.
+        *   **Detected spam patterns:** Most common triggers (e.g., LSH Fuzzy Match vs Exact Hash URLs).
+
+---
+
+## 7. About Me
+
+*   **Name:** [Your Name]
+*   **University/Major:** [Your University name], [Your Major], Year [Your Year]
+*   **Timezone:** [Your Timezone]
+*   **Time Commitment:** I can dedicate [30-40] hours per week to this project during the GSoC 2026 period.
+*   **Technical Skills:** Node.js, TypeScript, MongoDB, React, Meteor, API Design.
+
+## 8. About Me on Open Source
+
+*   **Contributions to Rocket.Chat:** 
+    *   [PR Link 1] - [Short description of what you fixed/built]
+    *   [PR Link 2] - [Short description of what you fixed/built]
+    *   *(Note: Remember to actually make at least 1-2 small PRs before submitting if you haven't!)*
+*   **Other Projects:** [Mention any relevant personal projects or other open source contributions related to web performance, security, or full-stack development]
+
+## 9. Proposed Timeline (GSoC 2026 Schedule)
+
+*   **Community Bonding (Weeks 1-3):** Finalize architectural decisions with mentors, configure the local development environment for the `minhash` package, and finalize the `UserUnderInspection` database schema.
+*   **Phase 1 (Weeks 4-5):** Implement the `UserUnderInspection` model with MongoDB TTL indexes. Hook into the `afterCreateUser` registry.
+*   **Phase 2 (Weeks 6-7):** Build the Sync Gate (`BeforeSaveAntiSpam`) focusing on exact-match hashing (O(1)) and `message.urls` cross-posting rules. Establish the scoring matrix foundation.
+*   **Midterm Evaluation (Week 8):** Deliver a working synchronous layer where users breaching Level 1 rules are dynamically warned and rate-limited.
+*   **Phase 3 (Weeks 9-10):** Develop the Async LSH Worker for processing fuzzy matches (Jaccard similarity via `minhash`). Implement the Event-Driven Auto-Healing (score decay) mechanism.
+*   **Phase 4 (Weeks 11-12):** Build the Moderation Console (Admin UI), the basic reporting cron jobs, and integrate the **On-Demand AI Prompting** logic. Write unit tests (Jest) for the scoring engine and E2E tests (Playwright) for the UI.
+*   **Final Week:** Final code cleanup, documentation writing, and merging final PRs.
+
+## 10. Testing, Edge Cases & Configuration
+
+*   **Testing Strategy:** 
+    *   **Jest:** For unit testing the scoring engine, ensuring accurate math and decay logic without race conditions.
+    *   **Playwright:** E2E testing for the newly added Admin Moderation UI to ensure data binds correctly.
+*   **Reversible & Configurable Constraints (Workspace Settings):** 
+    *   A new setting will be added to `Administration > Workspace > Settings` enabling server admins to globally **Enable/Disable** the Anti-Spam Pipeline.
+    *   Admins will be given parameters to adjust the strike thresholds (e.g., adjusting Level 1 points from 3 to 4) to accommodate their unique community needs.
 *   **Create `apps/meteor/server/api/v1/anti-spam.ts`**
-    *   *Action:* Provide `GET /v1/anti-spam.getScore` (REST Endpoint) for the React clients to fetch user shadow data securely (gated by `view-privileged-setting` permissions).
+    *   *Action:* Provide `GET /v1/anti-spam.getScore` (REST Endpoint) for the React clients to fetch user shadow data securely (gated by `view-privileged-setting` permissions) as well as endpoints to generate the basic reports.
